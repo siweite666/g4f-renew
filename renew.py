@@ -106,13 +106,12 @@ def get_server_status() -> dict | None:
         log("未配置 PANEL_API_TOKEN / SERVER_ID，跳过状态查询", "WARN")
         return None
     try:
-        req_headers = {"Authorization": f"Bearer {api_token}", "Accept": "Application/vnd.pterodactyl.v1+json"}
-        # 用 curl 绕过 urllib 的 403 问题
         import subprocess
+        auth_val = "Bearer " + api_token
         r = subprocess.run(
-            ["curl", "-s", "-H", f"Authorization: Bearer {api_token}",
+            ["curl", "-s", "-H", "Authorization: " + auth_val,
              "-H", "Accept: Application/vnd.pterodactyl.v1+json",
-             f"{panel_url}/api/client/servers/{server_id}"],
+             panel_url + "/api/client/servers/" + server_id],
             capture_output=True, text=True, timeout=15
         )
         data = json.loads(r.stdout)
