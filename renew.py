@@ -106,29 +106,32 @@ def get_server_status() -> dict | None:
         log("未配置 PANEL_API_TOKEN / SERVER_ID，跳过状态查询", "WARN")
         return None
     try:
-        headers = {"Authorization": f"Bearer {api_token}", "Accept": "Application/vnd.pterodactyl.v1+json"}
-        resp = requests.get(f"{panel_url}/api/client/servers/{server_id}", headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        req_headers = {"Authorization": f"Bearer {api_token}", "Accept": "Application/vnd.pterodactyl.v1+json"}
+        # 用 curl 绕过 urllib 的 403 问题
+        import subprocess
+        r = subprocess.run(
+            ["curl", "-s", "-H", f"Authorization: Bearer {api_token}",
+             "-H", "Accept: Application/vnd.pterodactyl.v1+json",
+             f"{panel_url}/api/client/servers/{server_id}"],
+            capture_output=True, text=True, timeout=15
+        )
+        data = json.loads(r.stdout)
         attrs = data.get("attributes", {})
         limits = attrs.get("limits", {})
-        # 获取 utilization
-        resp2 = requests.get(f"{panel_url}/api/client/servers/{server_id}/utilization", headers=headers, timeout=15)
-        resp2.raise_for_status()
-        util = resp2.json().get("attributes", {})
-        # 用 application API 获取到期时间（client API 不返回 expires_at）
-        app_token = api_token  # pacc_ token 同时有 client 权限
-        resp3 = requests.get(f"{panel_url}/api/application/servers/{server_id}", headers=headers, timeout=15)
-        expires = ""
-        if resp3.status_code == 200:
-            expires = resp3.json().get("attributes", {}).get("expires_at", "")
+        renewal = attrs.get("renewal") or {}
+        expires = renewal.get("expires_at", "")
+        seconds_remaining = renewal.get("seconds_remaining", 0)
+        is_suspended = renewal.get("is_suspended", False)
         return {
             "name": attrs.get("name", "unknown"),
             "memory": limits.get("memory", 0),
             "disk": limits.get("disk", 0),
             "cpu": limits.get("cpu", 0),
             "expires": expires,
-            "status": util.get("current_state", "unknown"),
+            "seconds_remaining": seconds_remaining,
+            "is_suspended": is_suspended,
+            "node": attrs.get("node", ""),
+            "suspended": attrs.get("is_suspended", False),
         }
     except Exception as e:
         log(f"查询服务器状态失败: {e}", "WARN")
@@ -151,26 +154,29 @@ def build_caption(status: str, username: str, reason: str = "", server_info: dic
         lines.append("")
         lines.append("🖥️ 服务器状态")
         lines.append(f"  名称: {server_info.get('name', 'N/A')}")
+        lines.append(f"  节点: {server_info.get('node', 'N/A')}")
         expires = server_info.get("expires", "")
+        seconds_remaining = server_info.get("seconds_remaining", 0)
+        if seconds_remaining > 0:
+            hours = int(seconds_remaining // 3600)
+            minutes = int((seconds_remaining % 3600) // 60)
+            lines.append(f"  剩余: {hours}小时{minutes}分钟")
         if expires:
             from datetime import datetime, timezone, timedelta
             try:
                 exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
-                remaining = exp_dt - now
-                hours = int(remaining.total_seconds() // 3600)
-                minutes = int((remaining.total_seconds() % 3600) // 60)
                 cst = timezone(timedelta(hours=8))
                 exp_cst = exp_dt.astimezone(cst)
                 lines.append(f"  到期: {exp_cst.strftime('%Y-%m-%d %H:%M')} CST")
-                if remaining.total_seconds() > 0:
-                    lines.append(f"  剩余: {hours}小时{minutes}分钟")
-                else:
-                    lines.append(f"  ⚠️ 已到期！")
             except Exception:
                 lines.append(f"  到期: {expires}")
+        if server_info.get("is_suspended"):
+            lines.append(f"  ⚠️ 已暂停！")
+        elif seconds_remaining <= 0:
+            lines.append(f"  ⚠️ 已到期！")
         lines.append(f"  内存: {server_info.get('memory', 'N/A')}MB")
         lines.append(f"  磁盘: {server_info.get('disk', 'N/A')}MB")
+        lines.append(f"  CPU: {server_info.get('cpu', 'N/A')}%")
 
     lines += ["", "Gaming4Free Auto Vote"]
     return "\n".join(lines)
