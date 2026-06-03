@@ -23,9 +23,8 @@ except ImportError as e:
 # 配置
 # ============================================================
 VOTE_URL = "https://g4f.gg/yousb"
-MAX_RETRIES = 5             # 最大重试次数
+MAX_RETRIES = 5             # 最大重试次数（含换 IP）
 SCREENSHOT_DIR = "output/screenshots"
-SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "")  # socks5://user:pass@host:port
 
 # ============================================================
 # 随机用户名
@@ -171,12 +170,6 @@ def create_browser() -> ChromiumPage:
     co.set_argument("--window-size=1280,900")
     co.set_argument("--disable-blink-features=AutomationControlled")
     co.set_argument("--disable-infobars")
-    # 代理
-    if SOCKS5_PROXY:
-        # Chromium 需要 --proxy-server=http:// 格式，不直接支持 socks5
-        # 但 DrissionPage 支持通过 proxy 设置
-        co.set_proxy(SOCKS5_PROXY)
-        log(f"已配置代理: {SOCKS5_PROXY[:30]}...")
     # 使用随机 User-Agent
     ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

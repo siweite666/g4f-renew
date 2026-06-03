@@ -54,7 +54,6 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
           echo "🎮 Gaming4Free Auto Vote"
           echo "========================"
