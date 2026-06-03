@@ -122,7 +122,7 @@ def get_server_status() -> dict | None:
         expires = renewal.get("expires_at", "")
         seconds_remaining = renewal.get("seconds_remaining", 0)
         is_suspended = renewal.get("is_suspended", False)
-        return {
+        info = {
             "name": attrs.get("name", "unknown"),
             "memory": limits.get("memory", 0),
             "disk": limits.get("disk", 0),
@@ -133,6 +133,10 @@ def get_server_status() -> dict | None:
             "node": attrs.get("node", ""),
             "suspended": attrs.get("is_suspended", False),
         }
+        hrs = int(seconds_remaining // 3600)
+        mins = int((seconds_remaining % 3600) // 60)
+        log(f"服务器状态: {info['name']} | 剩余 {hrs}h{mins}m | 暂停={is_suspended}")
+        return info
     except Exception as e:
         log(f"查询服务器状态失败: {e}", "WARN")
         return None
