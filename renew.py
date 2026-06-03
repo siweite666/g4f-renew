@@ -94,7 +94,48 @@ def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str):
     send_tg_message(token, chat_id, caption)
 
 
-def build_caption(status: str, username: str, reason: str = "") -> str:
+# ============================================================
+# Pterodactyl 服务器状态查询
+# ============================================================
+def get_server_status() -> dict | None:
+    """查询服务器剩余时间等信息"""
+    panel_url = "https://control.gaming4free.net"
+    api_token = os.environ.get("PANEL_API_TOKEN", "")
+    server_id = os.environ.get("SERVER_ID", "")
+    if not api_token or not server_id:
+        log("未配置 PANEL_API_TOKEN / SERVER_ID，跳过状态查询", "WARN")
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {api_token}", "Accept": "Application/vnd.pterodactyl.v1+json"}
+        resp = requests.get(f"{panel_url}/api/client/servers/{server_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        attrs = data.get("attributes", {})
+        limits = attrs.get("limits", {})
+        # 获取 utilization
+        resp2 = requests.get(f"{panel_url}/api/client/servers/{server_id}/utilization", headers=headers, timeout=15)
+        resp2.raise_for_status()
+        util = resp2.json().get("attributes", {})
+        # 用 application API 获取到期时间（client API 不返回 expires_at）
+        app_token = api_token  # pacc_ token 同时有 client 权限
+        resp3 = requests.get(f"{panel_url}/api/application/servers/{server_id}", headers=headers, timeout=15)
+        expires = ""
+        if resp3.status_code == 200:
+            expires = resp3.json().get("attributes", {}).get("expires_at", "")
+        return {
+            "name": attrs.get("name", "unknown"),
+            "memory": limits.get("memory", 0),
+            "disk": limits.get("disk", 0),
+            "cpu": limits.get("cpu", 0),
+            "expires": expires,
+            "status": util.get("current_state", "unknown"),
+        }
+    except Exception as e:
+        log(f"查询服务器状态失败: {e}", "WARN")
+        return None
+
+
+def build_caption(status: str, username: str, reason: str = "", server_info: dict | None = None) -> str:
     if status == "success":
         title = "✅ 投票成功 (+90分钟)"
     elif status == "cooldown":
@@ -105,6 +146,32 @@ def build_caption(status: str, username: str, reason: str = "") -> str:
     lines = [title, "", f"URL: {VOTE_URL}", f"用户名: {username}"]
     if reason:
         lines.append(f"原因: {reason}")
+
+    if server_info:
+        lines.append("")
+        lines.append("🖥️ 服务器状态")
+        lines.append(f"  名称: {server_info.get('name', 'N/A')}")
+        expires = server_info.get("expires", "")
+        if expires:
+            from datetime import datetime, timezone, timedelta
+            try:
+                exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                remaining = exp_dt - now
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                cst = timezone(timedelta(hours=8))
+                exp_cst = exp_dt.astimezone(cst)
+                lines.append(f"  到期: {exp_cst.strftime('%Y-%m-%d %H:%M')} CST")
+                if remaining.total_seconds() > 0:
+                    lines.append(f"  剩余: {hours}小时{minutes}分钟")
+                else:
+                    lines.append(f"  ⚠️ 已到期！")
+            except Exception:
+                lines.append(f"  到期: {expires}")
+        lines.append(f"  内存: {server_info.get('memory', 'N/A')}MB")
+        lines.append(f"  磁盘: {server_info.get('disk', 'N/A')}MB")
+
     lines += ["", "Gaming4Free Auto Vote"]
     return "\n".join(lines)
 
@@ -378,7 +445,8 @@ def main():
 
             if success:
                 log("✅ 投票成功！")
-                caption = build_caption("success", username)
+                srv = get_server_status()
+                caption = build_caption("success", username, server_info=srv)
                 send_tg_photo(tg_token, tg_chat_id, sc_path, caption)
                 try:
                     page.quit()
@@ -388,7 +456,8 @@ def main():
 
             if status == "cooldown":
                 log("⏳ 冷却期，等待后重试...")
-                caption = build_caption("cooldown", username)
+                srv = get_server_status()
+                caption = build_caption("cooldown", username, server_info=srv)
                 send_tg_photo(tg_token, tg_chat_id, sc_path, caption)
                 # 冷却期不需要换 IP，等几分钟再试
                 time.sleep(random.randint(60, 120))
