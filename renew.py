@@ -23,7 +23,7 @@ except ImportError as e:
 # 配置
 # ============================================================
 VOTE_URL = "https://g4f.gg/yousb"
-MAX_RETRIES = 20            # 最大重试次数（含换 IP）
+MAX_RETRIES = 5             # 最大重试次数（含换 IP）
 SCREENSHOT_DIR = "output/screenshots"
 
 # ============================================================
@@ -163,6 +163,7 @@ def restart_warp() -> bool:
 # ============================================================
 def create_browser() -> ChromiumPage:
     co = ChromiumOptions()
+    co.set_argument("--headless=new")
     co.set_argument("--no-sandbox")
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument("--disable-gpu")
