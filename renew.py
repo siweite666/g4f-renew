@@ -255,10 +255,9 @@ def create_browser() -> ChromiumPage:
     co.set_argument("--window-size=1280,900")
     co.set_argument("--disable-blink-features=AutomationControlled")
     co.set_argument("--disable-infobars")
-    # 代理
+    # 注意：DrissionPage 不支持 SOCKS5 代理，用 WARP 换 IP 代替
     if SOCKS5_PROXY:
-        co.set_proxy(SOCKS5_PROXY)
-        log(f"已配置代理: {SOCKS5_PROXY[:30]}...")
+        log("SOCKS5 代理已配置但 DrissionPage 不支持，跳过（使用 WARP 换 IP）", "WARN")
     # 使用随机 User-Agent
     ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -402,7 +401,14 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     """
     log(f"打开投票页面: {VOTE_URL}")
     page.get(VOTE_URL)
-    time.sleep(3)
+    time.sleep(5)  # 等待页面完全加载
+
+    # 检查实际 URL（是否被重定向）
+    try:
+        actual_url = page.url
+        log(f"实际 URL: {actual_url}")
+    except Exception:
+        pass
 
     # 检查是否被封锁
     if is_turnstile_blocked(page):
@@ -423,16 +429,35 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     except Exception as e:
         log(f"填写用户名失败: {e}", "WARN")
 
+    # 截图看看页面状态
+    screenshot(page, "before_vote.png")
+
     # 点击投票按钮（打开 Turnstile 弹窗）
+    # 尝试多种选择器
+    vote_btn = None
+    for selector in [".vote-btn", "css:button.vote-btn", "css:button:contains('Vote')", "css:.vote-btn"]:
+        try:
+            vote_btn = page.ele(selector, timeout=3)
+            if vote_btn:
+                log(f"找到投票按钮: {selector}")
+                break
+        except Exception:
+            pass
+
+    if not vote_btn:
+        # 调试：打印页面 HTML 片段
+        try:
+            html = page.run_js("return document.body?.innerHTML?.substring(0, 3000) || ''")
+            log(f"页面 HTML (前3000字符):\n{html}", "WARN")
+        except Exception as e:
+            log(f"获取页面HTML失败: {e}", "WARN")
+        log("未找到投票按钮!", "ERROR")
+        return False, "unknown", None
+
     try:
-        vote_btn = page.ele("css:.vote-btn", timeout=5)
-        if vote_btn:
-            log("点击投票按钮...")
-            vote_btn.click()
-            time.sleep(2)
-        else:
-            log("未找到投票按钮!", "ERROR")
-            return False, "unknown", None
+        log("点击投票按钮...")
+        vote_btn.click()
+        time.sleep(2)
     except Exception as e:
         log(f"点击投票按钮失败: {e}", "WARN")
         return False, "unknown", None
