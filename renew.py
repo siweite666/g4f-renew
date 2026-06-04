@@ -4,6 +4,13 @@
 Gaming4Free Public Page Renewal
 通过 g4f.gg 公开续期页面投票续期，每次投票 +90 分钟。
 Cloudflare Turnstile 通过浏览器自动化解决，IP 被封时用 WARP 换 IP 重试。
+
+流程：
+1. 打开页面，填写用户名
+2. 点击投票按钮 → 弹出 Turnstile 验证弹窗
+3. 等待 Turnstile 自动通过（token 写入隐藏 input）
+4. Turnstile 通过后自动提交表单
+5. 检查提交后的页面确认结果
 """
 
 import os
@@ -24,9 +31,9 @@ except ImportError as e:
 # 配置
 # ============================================================
 VOTE_URL = "https://g4f.gg/yousb"
-MAX_RETRIES = 5             # 最大重试次数
+MAX_RETRIES = 5
 SCREENSHOT_DIR = "output/screenshots"
-SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "")  # socks5://user:pass@host:port
+SOCKS5_PROXY = os.environ.get("SOCKS5_PROXY", "")
 
 # ============================================================
 # 随机用户名
@@ -264,51 +271,25 @@ def create_browser() -> ChromiumPage:
 
 
 # ============================================================
-# Turnstile 检测
+# Turnstile 等待
 # ============================================================
-def wait_for_turnstile(page, timeout: int = 30) -> bool:
-    """等待 Cloudflare Turnstile 验证完成"""
-    log("等待 Turnstile 加载...")
+def wait_for_turnstile_token(page, timeout: int = 60) -> bool:
+    """
+    等待 Cloudflare Turnstile 自动通过。
+    Turnstile 通过后会把 token 写入 #vote-turnstile-token input。
+    """
+    log("等待 Turnstile 验证...")
     start = time.time()
     while time.time() - start < timeout:
         try:
-            # 检查 turnstile 是否已生成 token
             token = page.run_js(
-                "return document.querySelector("
-                "\"input[name='cf-turnstile-response']\")?.value || ''"
+                "return document.getElementById('vote-turnstile-token')?.value || ''"
             )
             if token and len(token) > 20:
-                log(f"Turnstile 已通过 (token 长度: {len(token)})")
+                log(f"Turnstile 已通过! (token 长度: {len(token)})")
                 return True
         except Exception:
             pass
-
-        # 检查是否有 turnstile iframe
-        try:
-            frames = page.get_frames()
-            for frame in frames:
-                url = frame.url or ""
-                if "challenges.cloudflare" in url or "turnstile" in url:
-                    log("检测到 Turnstile iframe，尝试交互...")
-                    # 尝试点击 turnstile checkbox
-                    try:
-                        checkbox = frame.ele("css:input[type='checkbox']", timeout=2)
-                        if checkbox:
-                            checkbox.click()
-                            time.sleep(3)
-                    except Exception:
-                        pass
-                    # 也尝试点击 body
-                    try:
-                        body = frame.ele("css:body", timeout=2)
-                        if body:
-                            body.click()
-                            time.sleep(2)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
         time.sleep(2)
 
     log("Turnstile 超时未通过", "WARN")
@@ -316,7 +297,7 @@ def wait_for_turnstile(page, timeout: int = 30) -> bool:
 
 
 def is_turnstile_blocked(page) -> bool:
-    """检测是否被 Turnstile 封锁"""
+    """检测是否被 Turnstile/Cloudflare 封锁"""
     try:
         blocked = page.run_js("""
             const body = document.body?.textContent || '';
@@ -329,10 +310,14 @@ def is_turnstile_blocked(page) -> bool:
 
 
 # ============================================================
-# 检测投票结果
+# 检测投票结果（提交后的页面）
 # ============================================================
 def check_vote_result(page) -> str:
-    """检查投票结果: success / cooldown / blocked / unknown"""
+    """
+    检查投票结果: success / cooldown / blocked / unknown
+    注意：只在表单实际提交后调用此函数。
+    检查页面中实际显示给用户的消息文本，不是 CSS 类名。
+    """
     try:
         body_text = page.run_js("return document.body?.textContent || ''")
     except Exception:
@@ -340,23 +325,71 @@ def check_vote_result(page) -> str:
 
     body_lower = body_text.lower()
 
-    if "thank you" in body_lower or "voted" in body_lower or "success" in body_lower:
-        return "success"
-    if "cooldown" in body_lower or "wait" in body_lower or "too many" in body_lower:
-        return "cooldown"
+    # 检查成功消息 - 用更精确的匹配
+    # 成功后通常显示 "thank you for your vote" 或 "vote recorded" 等
+    success_phrases = [
+        "thank you for your vote",
+        "vote recorded",
+        "vote counted",
+        "vote has been recorded",
+        "successfully voted",
+        "your vote has been",
+        "+90 minutes",
+        "90 minutes added",
+    ]
+    for phrase in success_phrases:
+        if phrase in body_lower:
+            return "success"
+
+    # 检查冷却消息
+    cooldown_phrases = [
+        "cooldown",
+        "already voted",
+        "wait before voting",
+        "too many requests",
+        "please wait",
+        "try again later",
+    ]
+    for phrase in cooldown_phrases:
+        if phrase in body_lower:
+            return "cooldown"
+
+    # 检查封锁
     if "blocked" in body_lower or "access denied" in body_lower:
         return "blocked"
 
-    # 检查 URL 是否变化（成功后可能重定向）
+    # 检查 URL 变化（提交成功后通常会重定向）
     try:
         current_url = page.url
-        if current_url and "vote" not in current_url.lower():
-            # 可能是成功后重定向
-            return "success"
+        if current_url and "/vote" not in current_url.lower() and "g4f.gg" in current_url:
+            # 可能是成功后重定向回了原页面
+            # 再检查是否有 flash 消息
+            flash = page.run_js("""
+                const flash = document.querySelector('.flash-success, .alert-success, [class*="success"]');
+                return flash?.textContent?.trim() || '';
+            """)
+            if flash:
+                log(f"检测到 flash 消息: {flash}")
+                return "success"
     except Exception:
         pass
 
     return "unknown"
+
+
+# ============================================================
+# 检查投票前页面的初始状态
+# ============================================================
+def get_initial_timer(page) -> str:
+    """获取投票前的倒计时，用于后续对比"""
+    try:
+        timer = page.run_js("""
+            const el = document.querySelector('.countdown-time');
+            return el?.textContent?.trim() || '';
+        """)
+        return timer or ""
+    except Exception:
+        return ""
 
 
 # ============================================================
@@ -376,6 +409,10 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
         sc = screenshot(page, "blocked.png")
         return False, "blocked", sc
 
+    # 记录投票前的倒计时
+    timer_before = get_initial_timer(page)
+    log(f"投票前倒计时: {timer_before}")
+
     # 填写用户名
     try:
         name_input = page.ele("css:input[name='voter_name']", timeout=10)
@@ -386,39 +423,42 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     except Exception as e:
         log(f"填写用户名失败: {e}", "WARN")
 
-    # 等待 Turnstile 验证
-    turnstile_ok = wait_for_turnstile(page, timeout=45)
-
-    if not turnstile_ok:
-        # 尝试直接提交看看
-        log("Turnstile 未通过，尝试直接提交...")
-
-    # 截图
-    sc = screenshot(page, "before_vote.png")
-
-    # 点击投票按钮
+    # 点击投票按钮（打开 Turnstile 弹窗）
     try:
         vote_btn = page.ele("css:.vote-btn", timeout=5)
         if vote_btn:
             log("点击投票按钮...")
             vote_btn.click()
-            time.sleep(5)
+            time.sleep(2)
         else:
-            # 尝试直接提交表单
-            log("未找到投票按钮，尝试提交表单...")
-            page.run_js("document.getElementById('vote-form')?.submit()")
-            time.sleep(5)
+            log("未找到投票按钮!", "ERROR")
+            return False, "unknown", None
     except Exception as e:
         log(f"点击投票按钮失败: {e}", "WARN")
-        try:
-            page.run_js("document.getElementById('vote-form')?.submit()")
-            time.sleep(5)
-        except Exception:
-            pass
+        return False, "unknown", None
+
+    # 等待 Turnstile 验证通过
+    turnstile_ok = wait_for_turnstile_token(page, timeout=60)
+
+    if not turnstile_ok:
+        sc = screenshot(page, "turnstile_failed.png")
+        log("Turnstile 未通过，投票无法完成")
+        return False, "turnstile_failed", sc
+
+    # Turnstile 通过后，JS 会自动提交表单
+    # 等待页面跳转/提交完成
+    log("Turnstile 已通过，等待表单提交...")
+    time.sleep(8)
+
+    # 截图提交后的页面
+    sc_after = screenshot(page, "after_vote.png")
 
     # 检查结果
     result = check_vote_result(page)
-    sc_after = screenshot(page, "after_vote.png")
+
+    # 额外验证：检查倒计时是否增加了
+    timer_after = get_initial_timer(page)
+    log(f"投票后倒计时: {timer_after}")
 
     if result == "success":
         return True, "success", sc_after
@@ -427,6 +467,10 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     elif result == "blocked":
         return False, "blocked", sc_after
     else:
+        # 如果无法确定结果，但倒计时增加了，也算成功
+        if timer_before and timer_after and timer_before != timer_after:
+            log(f"倒计时变化，判定为成功")
+            return True, "success", sc_after
         return False, "unknown", sc_after
 
 
@@ -469,12 +513,22 @@ def main():
                 srv = get_server_status()
                 caption = build_caption("cooldown", username, server_info=srv)
                 send_tg_photo(tg_token, tg_chat_id, sc_path, caption)
-                # 冷却期不需要换 IP，等几分钟再试
                 time.sleep(random.randint(60, 120))
                 continue
 
             if status == "blocked":
                 log("🔒 IP 被封锁，换 IP 重试...")
+                try:
+                    page.quit()
+                except Exception:
+                    pass
+                page = None
+                restart_warp()
+                time.sleep(5)
+                continue
+
+            if status == "turnstile_failed":
+                log("🔐 Turnstile 验证失败，换 IP 重试...")
                 try:
                     page.quit()
                 except Exception:
