@@ -310,7 +310,16 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
 
     # 填写用户名
     try:
-        name_input = driver.find_element("css selector", "input[name='voter_name']")
+        name_input = None
+        for sel in ["input[name='voter_name']", "input[placeholder*='Steve']", "input[type='text']", "input[name='name']"]:
+            try:
+                name_input = driver.find_element("css selector", sel)
+                if name_input.is_displayed():
+                    log(f"找到输入框: {sel}")
+                    break
+                name_input = None
+            except Exception:
+                pass
         name_input.clear()
         name_input.send_keys(username)
         log(f"已填写用户名: {username}")
@@ -321,13 +330,26 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
 
     # 找到并点击投票按钮
     vote_btn = None
-    for selector in [".vote-btn", "button.vote-btn"]:
+    for selector in [".vote-btn", "button.vote-btn", "button[class*='vote']", "button[class*='add']"]:
         try:
             vote_btn = driver.find_element("css selector", selector)
             if vote_btn.is_displayed():
                 log(f"找到投票按钮: {selector}")
                 break
             vote_btn = None
+        except Exception:
+            pass
+
+    # Fallback: find button by text content
+    if not vote_btn:
+        try:
+            buttons = driver.find_elements("tag name", "button")
+            for btn in buttons:
+                text = btn.text or btn.get_attribute("textContent") or ""
+                if "ADD 90" in text.upper() or "90 MIN" in text.upper() or "VOTE" in text.upper():
+                    vote_btn = btn
+                    log(f"找到投票按钮 (by text): {text[:50]}")
+                    break
         except Exception:
             pass
 
@@ -353,7 +375,7 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
         return False, "turnstile_failed", sc
 
     log("Turnstile 已通过，等待表单提交...")
-    time.sleep(8)
+    time.sleep(10)
 
     sc_after = screenshot(driver, "after_vote.png")
     result = check_vote_result(driver)
