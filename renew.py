@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gaming4Free Auto Vote — undetected-chromedriver 版本
-用 undetected-chromedriver 绕过 Cloudflare Turnstile 检测。
+Gaming4Free Auto Vote — DrissionPage 版本
 """
 
 import os
@@ -13,9 +12,12 @@ import subprocess
 import json
 import requests
 
-# ============================================================
-# 配置
-# ============================================================
+try:
+    from DrissionPage import ChromiumPage, ChromiumOptions
+except ImportError as e:
+    print(f"[ERROR] DrissionPage 导入失败: {e}", flush=True)
+    sys.exit(1)
+
 VOTE_URL = "https://g4f.gg/yousb"
 MAX_RETRIES = 5
 SCREENSHOT_DIR = "output/screenshots"
@@ -43,9 +45,6 @@ def log(msg: str, level: str = "INFO"):
     print(f"{tag} {msg}", flush=True)
 
 
-# ============================================================
-# Telegram 通知
-# ============================================================
 def send_tg_message(token: str, chat_id: str, caption: str):
     if not token or not chat_id:
         return
@@ -77,9 +76,6 @@ def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str):
     send_tg_message(token, chat_id, caption)
 
 
-# ============================================================
-# 服务器状态
-# ============================================================
 def get_server_status() -> dict | None:
     panel_url = "https://control.gaming4free.net"
     api_token = os.environ.get("PANEL_API_TOKEN", "")
@@ -88,8 +84,7 @@ def get_server_status() -> dict | None:
         return None
     try:
         r = subprocess.run(
-            ["curl", "-s", "-H", f"Authorization: Bearer {api_token}",
-             "-H", "Accept: Application/vnd.pterodactyl.v1+json",
+            ["curl", "-s", "-H", f"Authorization: Bearer ***             "-H", "Accept: Application/vnd.pterodactyl.v1+json",
              f"{panel_url}/api/client/servers/{server_id}"],
             capture_output=True, text=True, timeout=15
         )
@@ -133,16 +128,6 @@ def build_caption(status: str, username: str, reason: str = "", server_info: dic
             hours = int(seconds_remaining // 3600)
             minutes = int((seconds_remaining % 3600) // 60)
             lines.append(f"  剩余: {hours}小时{minutes}分钟")
-        expires = server_info.get("expires", "")
-        if expires:
-            from datetime import datetime, timezone, timedelta
-            try:
-                exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                cst = timezone(timedelta(hours=8))
-                exp_cst = exp_dt.astimezone(cst)
-                lines.append(f"  到期: {exp_cst.strftime('%Y-%m-%d %H:%M')} CST")
-            except Exception:
-                lines.append(f"  到期: {expires}")
         if server_info.get("is_suspended"):
             lines.append("  ⚠️ 已暂停！")
 
@@ -150,9 +135,6 @@ def build_caption(status: str, username: str, reason: str = "", server_info: dic
     return "\n".join(lines)
 
 
-# ============================================================
-# WARP 换 IP
-# ============================================================
 def restart_warp() -> bool:
     log("正在重启 WARP 更换 IP...")
     try:
@@ -182,51 +164,35 @@ def restart_warp() -> bool:
         return False
 
 
-# ============================================================
-# 浏览器初始化 (undetected-chromedriver)
-# ============================================================
-def create_browser():
-    import undetected_chromedriver as uc
-
-    options = uc.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,900")
-    options.add_argument("--lang=en-US")
-
+def create_browser() -> ChromiumPage:
+    co = ChromiumOptions()
+    co.set_argument("--headless=new")
+    co.set_argument("--no-sandbox")
+    co.set_argument("--disable-dev-shm-usage")
+    co.set_argument("--disable-gpu")
+    co.set_argument("--window-size=1280,900")
+    co.set_argument("--disable-blink-features=AutomationControlled")
+    co.set_argument("--disable-infobars")
     if SOCKS5_PROXY:
-        options.add_argument(f"--proxy-server={SOCKS5_PROXY}")
-        log(f"使用 SOCKS5 代理: {SOCKS5_PROXY}")
-
-    driver = uc.Chrome(headless=True, options=options)
-    driver.set_page_load_timeout(30)
-    log("浏览器启动成功 (undetected-chromedriver)")
-    return driver
-
-
-def screenshot(driver, name: str) -> str | None:
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    path = os.path.join(SCREENSHOT_DIR, name)
-    try:
-        driver.save_screenshot(path)
-        log(f"截图已保存: {path}")
-        return path
-    except Exception as e:
-        log(f"截图失败: {e}", "WARN")
-        return None
+        log("SOCKS5 代理已配置但 DrissionPage 不支持，跳过", "WARN")
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{random.randint(120, 130)}.0.0.0 Safari/537.36"
+    )
+    co.set_user_agent(ua)
+    co.auto_port()
+    return ChromiumPage(co)
 
 
-# ============================================================
-# Turnstile 等待
-# ============================================================
-def wait_for_turnstile_token(driver, timeout: int = 90) -> bool:
-    """等待 Turnstile 验证通过（token 写入 #vote-turnstile-token）"""
+def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
+    """等待 Turnstile 验证通过"""
     log("等待 Turnstile 验证...")
     start = time.time()
     while time.time() - start < timeout:
         try:
-            token = driver.execute_script(
+            # 方法1: 检查 hidden input
+            token = page.run_js(
                 "return document.getElementById('vote-turnstile-token')?.value || ''"
             )
             if token and len(token) > 20:
@@ -235,16 +201,36 @@ def wait_for_turnstile_token(driver, timeout: int = 90) -> bool:
         except Exception:
             pass
 
-        # 检查 iframe 中的 Turnstile 是否有结果
         try:
-            # Turnstile 通过后有时会自动提交表单
-            body = driver.execute_script("return document.body?.textContent || ''")
-            if any(kw in body.lower() for kw in ["thank you", "vote recorded", "successfully", "+90 minutes"]):
-                log("检测到投票成功消息（Turnstile 自动提交）")
+            # 方法2: 检查页面是否已经跳转/提交
+            body = page.run_js("return document.body?.textContent || ''")
+            body_lower = body.lower()
+            if any(kw in body_lower for kw in ["thank you", "vote recorded", "successfully voted", "+90 minutes"]):
+                log("检测到投票成功消息")
                 return True
-            if "cooldown" in body.lower() or "already voted" in body.lower():
+            if "cooldown" in body_lower or "already voted" in body_lower:
                 log("检测到冷却消息")
                 return True
+        except Exception:
+            pass
+
+        try:
+            # 方法3: 检查 Turnstile iframe 的状态
+            status = page.run_js("""
+                const frames = document.querySelectorAll('iframe[src*="turnstile"]');
+                if (frames.length === 0) return 'no_iframe';
+                // 如果 Turnstile widget 消失了，可能已经通过
+                const widget = document.querySelector('[data-turnstile-callback]');
+                if (!widget) return 'no_widget';
+                return 'waiting';
+            """)
+            if status == 'no_iframe' or status == 'no_widget':
+                # Turnstile 可能已经通过并自动提交了
+                time.sleep(2)
+                body2 = page.run_js("return document.body?.textContent || ''")
+                if any(kw in body2.lower() for kw in ["thank you", "vote", "success", "cooldown", "90"]):
+                    log(f"Turnstile 状态: {status}，检测到结果消息")
+                    return True
         except Exception:
             pass
 
@@ -254,99 +240,94 @@ def wait_for_turnstile_token(driver, timeout: int = 90) -> bool:
     return False
 
 
-# ============================================================
-# 检查投票结果
-# ============================================================
-def check_vote_result(driver) -> str:
+def check_vote_result(page) -> str:
     try:
-        body_text = driver.execute_script("return document.body?.textContent || ''")
+        body_text = page.run_js("return document.body?.textContent || ''")
     except Exception:
         return "unknown"
-
     body_lower = body_text.lower()
 
     for phrase in ["thank you for your vote", "vote recorded", "successfully voted", "+90 minutes", "90 minutes added"]:
         if phrase in body_lower:
             return "success"
-
     for phrase in ["cooldown", "already voted", "please wait", "try again later"]:
         if phrase in body_lower:
             return "cooldown"
-
     if "blocked" in body_lower or "access denied" in body_lower:
         return "blocked"
-
     return "unknown"
 
 
-def get_timer_text(driver) -> str:
+def get_timer_text(page) -> str:
     try:
-        return driver.execute_script(
+        return page.run_js(
             "return document.querySelector('.countdown-time')?.textContent?.trim() || ''"
         ) or ""
     except Exception:
         return ""
 
 
-# ============================================================
-# 单次投票尝试
-# ============================================================
-def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
+def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     log(f"打开投票页面: {VOTE_URL}")
-    driver.get(VOTE_URL)
+    page.get(VOTE_URL)
     time.sleep(5)
 
-    # 检查封锁
     try:
-        body = driver.execute_script("return document.body?.textContent || ''")
-        if "blocked" in body.lower() or "access denied" in body.lower() or "error 1020" in body.lower():
-            sc = screenshot(driver, "blocked.png")
+        actual_url = page.url
+        log(f"实际 URL: {actual_url}")
+    except Exception:
+        pass
+
+    try:
+        body = page.run_js("return document.body?.textContent || ''")
+        if "blocked" in body.lower() or "access denied" in body.lower():
+            sc = screenshot(page, "blocked.png")
             return False, "blocked", sc
     except Exception:
         pass
 
-    timer_before = get_timer_text(driver)
+    timer_before = get_timer_text(page)
     log(f"投票前倒计时: {timer_before}")
 
-    # 填写用户名
+    # 填写用户名 - 尝试多种选择器
     try:
         name_input = None
-        for sel in ["input[name='voter_name']", "input[placeholder*='Steve']", "input[type='text']", "input[name='name']"]:
+        for sel in ["css:input[name='voter_name']", "css:input[placeholder*='Steve']", "css:input[type='text']"]:
             try:
-                name_input = driver.find_element("css selector", sel)
-                if name_input.is_displayed():
+                name_input = page.ele(sel, timeout=3)
+                if name_input:
                     log(f"找到输入框: {sel}")
                     break
-                name_input = None
             except Exception:
                 pass
-        name_input.clear()
-        name_input.send_keys(username)
-        log(f"已填写用户名: {username}")
+        if name_input:
+            name_input.clear()
+            name_input.input(username)
+            log(f"已填写用户名: {username}")
+        else:
+            log("未找到用户名输入框", "WARN")
     except Exception as e:
         log(f"填写用户名失败: {e}", "WARN")
 
-    screenshot(driver, "before_vote.png")
+    screenshot(page, "before_vote.png")
 
-    # 找到并点击投票按钮
+    # 找到投票按钮
     vote_btn = None
-    for selector in [".vote-btn", "button.vote-btn", "button[class*='vote']", "button[class*='add']"]:
+    for selector in ["css:.vote-btn", "css:button.vote-btn", "css:button:contains('Vote')", "css:button:contains('ADD')", "css:button:contains('90')"]:
         try:
-            vote_btn = driver.find_element("css selector", selector)
-            if vote_btn.is_displayed():
+            vote_btn = page.ele(selector, timeout=3)
+            if vote_btn:
                 log(f"找到投票按钮: {selector}")
                 break
-            vote_btn = None
         except Exception:
             pass
 
-    # Fallback: find button by text content
     if not vote_btn:
+        # Fallback: 遍历所有按钮
         try:
-            buttons = driver.find_elements("tag name", "button")
-            for btn in buttons:
-                text = btn.text or btn.get_attribute("textContent") or ""
-                if "ADD 90" in text.upper() or "90 MIN" in text.upper() or "VOTE" in text.upper():
+            for btn in page.eles("tag:button"):
+                text = btn.text or ""
+                if any(kw in text.upper() for kw in ["ADD 90", "90 MIN", "VOTE"]):
                     vote_btn = btn
                     log(f"找到投票按钮 (by text): {text[:50]}")
                     break
@@ -354,9 +335,13 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
             pass
 
     if not vote_btn:
+        try:
+            html = page.run_js("return document.body?.innerHTML?.substring(0, 3000) || ''")
+            log(f"页面 HTML (前3000字符):\n{html}", "WARN")
+        except Exception:
+            pass
         log("未找到投票按钮!", "ERROR")
-        screenshot(driver, "no_button.png")
-        return False, "unknown", None
+        return False, "unknown", screenshot(page, "no_button.png")
 
     try:
         log("点击投票按钮...")
@@ -367,20 +352,20 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
         return False, "unknown", None
 
     # 等待 Turnstile
-    turnstile_ok = wait_for_turnstile_token(driver, timeout=90)
+    turnstile_ok = wait_for_turnstile_token(page, timeout=90)
 
     if not turnstile_ok:
-        sc = screenshot(driver, "turnstile_failed.png")
+        sc = screenshot(page, "turnstile_failed.png")
         log("Turnstile 未通过，投票无法完成")
         return False, "turnstile_failed", sc
 
     log("Turnstile 已通过，等待表单提交...")
     time.sleep(10)
 
-    sc_after = screenshot(driver, "after_vote.png")
-    result = check_vote_result(driver)
+    sc_after = screenshot(page, "after_vote.png")
+    result = check_vote_result(page)
 
-    timer_after = get_timer_text(driver)
+    timer_after = get_timer_text(page)
     log(f"投票后倒计时: {timer_after}")
 
     if result == "success":
@@ -396,28 +381,37 @@ def attempt_vote(driver, username: str) -> tuple[bool, str, str | None]:
         return False, "unknown", sc_after
 
 
-# ============================================================
-# 主程序
-# ============================================================
+def screenshot(page, name: str) -> str | None:
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    path = os.path.join(SCREENSHOT_DIR, name)
+    try:
+        page.get_screenshot(path=path)
+        log(f"截图已保存: {path}")
+        return path
+    except Exception as e:
+        log(f"截图失败: {e}", "WARN")
+        return None
+
+
 def main():
     tg_token = os.environ.get("TG_BOT_TOKEN", "")
     tg_chat_id = os.environ.get("TG_CHAT_ID", "")
 
     log("=" * 50)
-    log("Gaming4Free Auto Vote (undetected-chromedriver)")
+    log("Gaming4Free Auto Vote (DrissionPage)")
     log("=" * 50)
 
-    driver = None
+    page = None
     for attempt in range(1, MAX_RETRIES + 1):
         log(f"\n--- 第 {attempt}/{MAX_RETRIES} 次尝试 ---")
         username = random_username()
         log(f"用户名: {username}")
 
         try:
-            if driver is None:
-                driver = create_browser()
+            if page is None:
+                page = create_browser()
 
-            success, status, sc_path = attempt_vote(driver, username)
+            success, status, sc_path = attempt_vote(page, username)
 
             if success:
                 log("✅ 投票成功！")
@@ -425,7 +419,7 @@ def main():
                 caption = build_caption("success", username, server_info=srv)
                 send_tg_photo(tg_token, tg_chat_id, sc_path, caption)
                 try:
-                    driver.quit()
+                    page.quit()
                 except Exception:
                     pass
                 return 0
@@ -441,31 +435,31 @@ def main():
             if status in ("blocked", "turnstile_failed"):
                 log(f"🔐 {status}，换 IP 重试...")
                 try:
-                    driver.quit()
+                    page.quit()
                 except Exception:
                     pass
-                driver = None
+                page = None
                 restart_warp()
                 time.sleep(5)
                 continue
 
             log("❓ 未知结果，换 IP 重试...")
             try:
-                driver.quit()
+                page.quit()
             except Exception:
                 pass
-            driver = None
+            page = None
             restart_warp()
             time.sleep(5)
 
         except Exception as e:
             log(f"异常: {e}", "ERROR")
             try:
-                if driver:
-                    driver.quit()
+                if page:
+                    page.quit()
             except Exception:
                 pass
-            driver = None
+            page = None
             restart_warp()
             time.sleep(5)
 
