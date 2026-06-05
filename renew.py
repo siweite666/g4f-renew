@@ -166,7 +166,9 @@ def restart_warp() -> bool:
 
 def create_browser() -> ChromiumPage:
     co = ChromiumOptions()
-    co.set_argument("--headless=new")
+    use_xvfb = os.environ.get("USE_XVFB", "")
+    if not use_xvfb:
+        co.set_argument("--headless=new")
     co.set_argument("--no-sandbox")
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument("--disable-gpu")
