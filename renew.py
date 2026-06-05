@@ -190,10 +190,17 @@ def create_browser() -> ChromiumPage:
 
 
 def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
-    """等待 Turnstile 验证通过"""
+    """
+    等待 Turnstile 验证通过。
+    只有在以下情况才认为通过：
+    1. vote-turnstile-token input 有值
+    2. 页面出现了明确的成功/冷却消息
+    不再用 no_iframe 判断（太容易误判）
+    """
     log("等待 Turnstile 验证...")
     start = time.time()
     while time.time() - start < timeout:
+        # 方法1: 检查隐藏 input 的 token 值（最可靠）
         try:
             token_val = page.run_js(
                 "return document.getElementById('vote-turnstile-token')?.value || ''"
@@ -204,31 +211,32 @@ def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
         except Exception:
             pass
 
+        # 方法2: 检查页面是否已跳转到结果页
         try:
             body = page.run_js("return document.body?.textContent || ''")
             body_lower = body.lower()
-            if any(kw in body_lower for kw in ["thank you", "vote recorded", "successfully voted", "+90 minutes"]):
+            # 只有明确的成功消息才算通过
+            if any(kw in body_lower for kw in [
+                "thank you for your vote", "vote recorded",
+                "successfully voted", "90 minutes added"
+            ]):
                 log("检测到投票成功消息")
                 return True
+            # 冷却消息也算通过（说明之前的投票已经生效）
             if "cooldown" in body_lower or "already voted" in body_lower:
-                log("检测到冷却消息")
+                log("检测到冷却消息（已有投票生效）")
                 return True
         except Exception:
             pass
 
+        # 方法3: 检查表单是否已提交（URL 变化或页面内容变化）
         try:
-            status = page.run_js("""
-                const frames = document.querySelectorAll('iframe[src*="turnstile"]');
-                if (frames.length === 0) return 'no_iframe';
-                const widget = document.querySelector('[data-turnstile-callback]');
-                if (!widget) return 'no_widget';
-                return 'waiting';
-            """)
-            if status in ('no_iframe', 'no_widget'):
-                time.sleep(2)
+            current_url = page.url
+            if current_url and "/vote" not in current_url.lower() and "g4f.gg" in current_url:
+                # 可能已经跳转回主页（投票成功后的行为）
                 body2 = page.run_js("return document.body?.textContent || ''")
-                if any(kw in body2.lower() for kw in ["thank you", "vote", "success", "cooldown", "90"]):
-                    log(f"Turnstile 状态: {status}，检测到结果消息")
+                if any(kw in body2.lower() for kw in ["thank you", "success", "voted"]):
+                    log("检测到页面跳转，投票可能成功")
                     return True
         except Exception:
             pass
@@ -240,6 +248,7 @@ def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
 
 
 def check_vote_result(page) -> str:
+    """检查投票结果 - 只在表单实际提交后调用"""
     try:
         body_text = page.run_js("return document.body?.textContent || ''")
     except Exception:
@@ -255,6 +264,19 @@ def check_vote_result(page) -> str:
     if "blocked" in body_lower or "access denied" in body_lower:
         return "blocked"
     return "unknown"
+
+
+def parse_timer(timer_str: str) -> int:
+    """将倒计时字符串解析为秒数，如 '01:30:00' -> 5400"""
+    try:
+        parts = timer_str.strip().split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+    except Exception:
+        pass
+    return 0
 
 
 def get_timer_text(page) -> str:
@@ -286,7 +308,8 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
         pass
 
     timer_before = get_timer_text(page)
-    log(f"投票前倒计时: {timer_before}")
+    timer_before_secs = parse_timer(timer_before)
+    log(f"投票前倒计时: {timer_before} ({timer_before_secs}s)")
 
     # 填写用户名
     try:
@@ -349,7 +372,7 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
         log(f"点击投票按钮失败: {e}", "WARN")
         return False, "unknown", None
 
-    # 等待 Turnstile
+    # 等待 Turnstile（严格检测）
     turnstile_ok = wait_for_turnstile_token(page, timeout=90)
 
     if not turnstile_ok:
@@ -364,7 +387,12 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     result = check_vote_result(page)
 
     timer_after = get_timer_text(page)
-    log(f"投票后倒计时: {timer_after}")
+    timer_after_secs = parse_timer(timer_after)
+    log(f"投票后倒计时: {timer_after} ({timer_after_secs}s)")
+
+    # 验证：倒计时是否增加了至少 60 分钟（3600秒）
+    timer_diff = timer_after_secs - timer_before_secs
+    log(f"倒计时变化: {timer_diff}s")
 
     if result == "success":
         return True, "success", sc_after
@@ -373,10 +401,16 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     elif result == "blocked":
         return False, "blocked", sc_after
     else:
-        if timer_before and timer_after and timer_before != timer_after:
-            log("倒计时变化，判定为成功")
+        # 只有倒计时增加了至少 60 分钟才算成功
+        if timer_diff > 3600:
+            log(f"倒计时增加了 {timer_diff}s，判定为成功")
             return True, "success", sc_after
-        return False, "unknown", sc_after
+        elif timer_diff > 0:
+            log(f"倒计时只增加了 {timer_diff}s（可能是正常刷新），判定为未成功")
+            return False, "unknown", sc_after
+        else:
+            log("倒计时未增加，投票未生效")
+            return False, "unknown", sc_after
 
 
 def screenshot(page, name: str) -> str | None:
