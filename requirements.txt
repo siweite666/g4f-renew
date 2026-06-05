@@ -1,3 +1,2 @@
-undetected-chromedriver>=3.5.0
-selenium>=4.10.0
+DrissionPage>=4.0.0
 requests>=2.28.0
