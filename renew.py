@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gaming4Free Auto Vote — DrissionPage 版本
+Gaming4Free Auto Vote — DrissionPage + xvfb 版本
 """
 
 import os
@@ -45,12 +45,12 @@ def log(msg: str, level: str = "INFO"):
     print(f"{tag} {msg}", flush=True)
 
 
-def send_tg_message(token: str, chat_id: str, caption: str):
-    if not token or not chat_id:
+def send_tg_message(tg_token: str, chat_id: str, caption: str):
+    if not tg_token or not chat_id:
         return
     try:
         requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            f"https://api.telegram.org/bot{tg_token}/sendMessage",
             data={"chat_id": chat_id, "text": caption},
             timeout=30,
         )
@@ -58,14 +58,14 @@ def send_tg_message(token: str, chat_id: str, caption: str):
         pass
 
 
-def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str):
-    if not token or not chat_id:
+def send_tg_photo(tg_token: str, chat_id: str, photo_path: str, caption: str):
+    if not tg_token or not chat_id:
         return
     if photo_path and os.path.exists(photo_path):
         try:
             with open(photo_path, "rb") as f:
                 requests.post(
-                    f"https://api.telegram.org/bot{token}/sendPhoto",
+                    f"https://api.telegram.org/bot{tg_token}/sendPhoto",
                     data={"chat_id": chat_id, "caption": caption},
                     files={"photo": f},
                     timeout=30,
@@ -73,19 +73,21 @@ def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str):
                 return
         except Exception:
             pass
-    send_tg_message(token, chat_id, caption)
+    send_tg_message(tg_token, chat_id, caption)
 
 
 def get_server_status() -> dict | None:
     panel_url = "https://control.gaming4free.net"
-    api_token = os.environ.get("PANEL_API_TOKEN", "")
-    server_id = os.environ.get("SERVER_ID", "")
-    if not api_token or not server_id:
+    api_key = os.environ.get("PANEL_API_TOKEN", "")
+    srv_id = os.environ.get("SERVER_ID", "")
+    if not api_key or not srv_id:
         return None
     try:
+        auth_header = "Bearer " + api_key
+        url = panel_url + "/api/client/servers/" + srv_id
         r = subprocess.run(
-            ["curl", "-s", "-H", f"Authorization: Bearer ***             "-H", "Accept: Application/vnd.pterodactyl.v1+json",
-             f"{panel_url}/api/client/servers/{server_id}"],
+            ["curl", "-s", "-H", "Authorization: " + auth_header,
+             "-H", "Accept: Application/vnd.pterodactyl.v1+json", url],
             capture_output=True, text=True, timeout=15
         )
         data = json.loads(r.stdout)
@@ -179,8 +181,8 @@ def create_browser() -> ChromiumPage:
         log("SOCKS5 代理已配置但 DrissionPage 不支持，跳过", "WARN")
     ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        f"AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{random.randint(120, 130)}.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/" + str(random.randint(120, 130)) + ".0.0.0 Safari/537.36"
     )
     co.set_user_agent(ua)
     co.auto_port()
@@ -193,18 +195,16 @@ def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
-            # 方法1: 检查 hidden input
-            token = page.run_js(
+            token_val = page.run_js(
                 "return document.getElementById('vote-turnstile-token')?.value || ''"
             )
-            if token and len(token) > 20:
-                log(f"Turnstile 已通过! (token 长度: {len(token)})")
+            if token_val and len(token_val) > 20:
+                log(f"Turnstile 已通过! (token 长度: {len(token_val)})")
                 return True
         except Exception:
             pass
 
         try:
-            # 方法2: 检查页面是否已经跳转/提交
             body = page.run_js("return document.body?.textContent || ''")
             body_lower = body.lower()
             if any(kw in body_lower for kw in ["thank you", "vote recorded", "successfully voted", "+90 minutes"]):
@@ -217,17 +217,14 @@ def wait_for_turnstile_token(page, timeout: int = 90) -> bool:
             pass
 
         try:
-            # 方法3: 检查 Turnstile iframe 的状态
             status = page.run_js("""
                 const frames = document.querySelectorAll('iframe[src*="turnstile"]');
                 if (frames.length === 0) return 'no_iframe';
-                // 如果 Turnstile widget 消失了，可能已经通过
                 const widget = document.querySelector('[data-turnstile-callback]');
                 if (!widget) return 'no_widget';
                 return 'waiting';
             """)
-            if status == 'no_iframe' or status == 'no_widget':
-                # Turnstile 可能已经通过并自动提交了
+            if status in ('no_iframe', 'no_widget'):
                 time.sleep(2)
                 body2 = page.run_js("return document.body?.textContent || ''")
                 if any(kw in body2.lower() for kw in ["thank you", "vote", "success", "cooldown", "90"]):
@@ -291,10 +288,10 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
     timer_before = get_timer_text(page)
     log(f"投票前倒计时: {timer_before}")
 
-    # 填写用户名 - 尝试多种选择器
+    # 填写用户名
     try:
         name_input = None
-        for sel in ["css:input[name='voter_name']", "css:input[placeholder*='Steve']", "css:input[type='text']"]:
+        for sel in ["css:input[name='voter_name']", "css:input[placeholder*='Steve']", "css:input[type='text']", "css:input"]:
             try:
                 name_input = page.ele(sel, timeout=3)
                 if name_input:
@@ -325,7 +322,6 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
             pass
 
     if not vote_btn:
-        # Fallback: 遍历所有按钮
         try:
             for btn in page.eles("tag:button"):
                 text = btn.text or ""
@@ -338,8 +334,8 @@ def attempt_vote(page, username: str) -> tuple[bool, str, str | None]:
 
     if not vote_btn:
         try:
-            html = page.run_js("return document.body?.innerHTML?.substring(0, 3000) || ''")
-            log(f"页面 HTML (前3000字符):\n{html}", "WARN")
+            html = page.run_js("return document.body?.innerHTML?.substring(0, 5000) || ''")
+            log(f"页面 HTML (前5000字符):\n{html}", "WARN")
         except Exception:
             pass
         log("未找到投票按钮!", "ERROR")
@@ -400,7 +396,7 @@ def main():
     tg_chat_id = os.environ.get("TG_CHAT_ID", "")
 
     log("=" * 50)
-    log("Gaming4Free Auto Vote (DrissionPage)")
+    log("Gaming4Free Auto Vote (DrissionPage + xvfb)")
     log("=" * 50)
 
     page = None
@@ -466,7 +462,7 @@ def main():
             time.sleep(5)
 
     log("❌ 所有重试都失败")
-    caption = build_caption("failure", "N/A", f"{MAX_RETRIES} 次重试均失败")
+    caption = build_caption("failure", "N/A", str(MAX_RETRIES) + " 次重试均失败")
     send_tg_message(tg_token, tg_chat_id, caption)
     return 1
 
