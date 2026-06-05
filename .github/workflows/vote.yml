@@ -22,11 +22,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            xvfb \
-            wget \
-            gnupg2 \
-            software-properties-common
+          sudo apt-get install -y             xvfb             wget             gnupg2             software-properties-common
 
       - name: Install Google Chrome
         run: |
@@ -57,12 +53,13 @@ jobs:
           SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
           PANEL_API_TOKEN: ${{ secrets.PANEL_API_TOKEN }}
           SERVER_ID: ${{ secrets.SERVER_ID }}
+          USE_XVFB: "1"
         run: |
           echo "🎮 Gaming4Free Auto Vote"
           echo "========================"
           echo "Time: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
           echo ""
-          python renew.py 2>&1 | tee output.log
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python renew.py 2>&1 | tee output.log
 
       - name: Upload screenshots
         if: always()
